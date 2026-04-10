@@ -3,6 +3,8 @@ STD=-std=c++20
 WFLAGS=-Wall -Wextra
 APPNAME=program
 
+ARGS=
+
 # Configuración de cpplint
 CPPLINT_FLAGS=--filter=-readability/casting,-build/header_guard,-build/include_subdir,-runtime/int
 
@@ -33,8 +35,9 @@ $(BIN):
 $(BUILD):
 	mkdir -p $@
 
+
 run:
-	./$(BIN)/$(APPNAME)
+	./$(BIN)/$(APPNAME) $(ARGS)
 
 clean:
 	rm -rf $(BIN) $(BUILD)

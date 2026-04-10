@@ -8,8 +8,8 @@
 #include <time.h>
 
 const int N = 30;
-const int streets = 5;
-const int cars = 100;
+int streets = 5;
+int cars = 100;
 
 void carInStreet(Buzon* buzones[], Buzon* mutex, int id) {
     srand(time(NULL) ^ getpid());
@@ -54,8 +54,13 @@ void carInStreet(Buzon* buzones[], Buzon* mutex, int id) {
     mutex->Enviar(lock);
 }
 
-int main () {
-
+int main(int argc, char* argv[]) {
+    if (argc > 1) {
+        cars = atoi(argv[1]);
+    }
+    if (argc > 2) {
+        streets = atoi(argv[2]);
+    }
     Buzon* buzones[streets];
     for (int i = 0; i < streets; i++) {
         buzones[i] = new Buzon(i);
