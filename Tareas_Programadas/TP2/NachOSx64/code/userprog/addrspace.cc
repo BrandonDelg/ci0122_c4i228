@@ -21,6 +21,12 @@
 #include "system.h"
 #include "addrspace.h"
 #include "noff.h"
+
+
+bool AddrSpace::IsValid()
+{
+    return pageTable != NULL && numPages > 0;
+}
 //----------------------------------------------------------------------
 // SwapHeader
 // 	Do little endian to big endian conversion on the bytes in the 
@@ -126,17 +132,27 @@ AddrSpace::AddrSpace(OpenFile *executable)
     // machine->frameMap->Mark(10);
 // first, set up the translation 
     this->pageTable = new TranslationEntry[numPages];
+
+
     for (i = 0; i < numPages; i++) {
-	pageTable[i].virtualPage = i;	// for now, virtual page # = phys page #
-	pageTable[i].physicalPage = machine->frameMap->Find();
-	pageTable[i].valid = true;
-	pageTable[i].use = false;
-	pageTable[i].dirty = false;
-	pageTable[i].readOnly = false;  // if the code segment was entirely on 
-					// a separate page, we could set its 
-					// pages to be read-only
+        int frame = machine->frameMap->Find();
+        if (frame == -1) {
+            printf("ERROR: No hay memoria fisica para cargar el programa\n");
+            for (unsigned int j = 0; j < i; j++) {
+                machine->frameMap->Clear(pageTable[j].physicalPage);
+            }
+            delete [] pageTable;
+            pageTable = NULL;
+            numPages = 0;
+            return;
+        }
+        pageTable[i].virtualPage = i;
+        pageTable[i].physicalPage = frame;
+        pageTable[i].valid = true;
+        pageTable[i].use = false;
+        pageTable[i].dirty = false;
+        pageTable[i].readOnly = false;
     }
-    
 // zero out the entire address space, to zero the unitialized data segment 
 // and the stack segment
     for (i = 0; i < numPages; i++) {

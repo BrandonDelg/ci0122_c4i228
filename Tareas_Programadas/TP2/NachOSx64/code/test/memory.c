@@ -1,10 +1,10 @@
 #include "syscall.h"
 
-int array[16];
+int array[128];
 
 int main() {
 	int i;
-	for (i = 0; i < 16; i++) 
+	for (i = 0; i < 128; i++) 
 		array[i] = 2025;
 
 	Exit(0);

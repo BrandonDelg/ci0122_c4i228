@@ -149,8 +149,8 @@ void NachOS_Exit()
 }
 /*
  *  System call interface: SpaceId Exec( char * )
- */void NachosExecThread(void *arg)
-{
+ */
+void NachosExecThread(void *arg) {
    ExecInfo *info = (ExecInfo *)arg;
 
    OpenFile *executable = fileSystem->Open(info->filename);
@@ -169,6 +169,21 @@ void NachOS_Exit()
    processTable[info->pid].thread = currentThread;
 
    currentThread->space = new AddrSpace(executable);
+
+   if (!currentThread->space->IsValid()) {
+      processTable[info->pid].exitStatus = -1;
+      processTable[info->pid].joinSem->V();
+
+      delete currentThread->space;
+      currentThread->space = NULL;
+
+      delete executable;
+      delete [] info->filename;
+      delete info;
+
+      currentThread->Finish();
+      return;
+   }
 
    delete executable;
    delete [] info->filename;
@@ -335,15 +350,22 @@ void NachOS_Read()
 
    char buffer[512];
 
-   if (size > 512) size = 512;
+   if (size > 512)
+      size = 512;
 
    int result = 0;
 
-   if (file == 0) {
+   if (file == 0) {   // ConsoleInput
+
       int i;
-      for (i = 0; i < size - 1; i++) {
+
+      for (i = 0; i < size; i++) {
+
          int c = getchar();
-         if (c == EOF) break;
+
+         if (c == EOF) {
+            break;
+         }
 
          buffer[i] = (char)c;
 
@@ -354,20 +376,29 @@ void NachOS_Read()
       }
 
       result = i;
+
    } else {
+
       int unixFd =
-      currentThread->space->openFilesTable->getUnixHandle(file);
+         currentThread->space->openFilesTable
+            ->getUnixHandle(file);
 
       if (unixFd < 0) {
          machine->WriteRegister(2, -1);
          return;
       }
 
-      result = read(unixFd, buffer, size);   }
+      result = read(unixFd, buffer, size);
+   }
 
    if (result > 0) {
+
       for (int i = 0; i < result; i++) {
-         machine->WriteMem(addr + i, 1, buffer[i]);
+
+         if (!machine->WriteMem(addr + i, 1, (int)buffer[i])) {
+            machine->WriteRegister(2, -1);
+            return;
+         }
       }
    }
 
@@ -910,8 +941,8 @@ ExceptionHandler(ExceptionType which)
                 updatePc();
                 break;
              case SC_Join:		// System call # 3
-                updatePc();
                 NachOS_Join();
+                updatePc();
                 break;
 
              case SC_Create:		// System call # 4
@@ -956,8 +987,8 @@ ExceptionHandler(ExceptionType which)
                 updatePc();
                 break;
              case SC_SemWait:           // System call # 14
-                updatePc();
                 NachOS_SemWait();
+                updatePc();
                 break;
 
              case SC_LckCreate:         // System call # 15
@@ -969,8 +1000,8 @@ ExceptionHandler(ExceptionType which)
                 updatePc();
                 break;
              case SC_LckAcquire:         // System call # 17
-                updatePc();
                 NachOS_LockAcquire();
+                updatePc();
                 break;
              case SC_LckRelease:           // System call # 18
                 NachOS_LockRelease();
@@ -990,8 +1021,8 @@ ExceptionHandler(ExceptionType which)
                 updatePc();
                 break;
              case SC_CondWait:           // System call # 22
-                updatePc();
                 NachOS_CondWait();
+                updatePc();
                 break;
              case SC_CondBroadcast:           // System call # 23
                 NachOS_CondBroadcast();
@@ -1049,9 +1080,11 @@ ExceptionHandler(ExceptionType which)
           break;
 
        case AddressErrorException:
-          printf( "Address error exception (%d)\n", which );
-          ASSERT( false );
-          break;
+            printf("AddressErrorException en PC=%d, BadVAddr=%d\n",
+            machine->ReadRegister(PCReg),
+            machine->ReadRegister(BadVAddrReg));
+            ASSERT(false);
+            break;
 
        case OverflowException:
           printf( "Overflow exception (%d)\n", which );

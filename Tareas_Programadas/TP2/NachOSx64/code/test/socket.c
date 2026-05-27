@@ -24,6 +24,21 @@ void quitarSalto(char *s) {
    }
 }
 
+int inicioBody(char *resp, int n) {
+   int i;
+
+   for (i = 0; i < n - 3; i++) {
+      if (resp[i] == '\r' &&
+          resp[i + 1] == '\n' &&
+          resp[i + 2] == '\r' &&
+          resp[i + 3] == '\n') {
+         return i + 4;
+      }
+   }
+
+   return 0;
+}
+
 void pedirLista() {
    int id;
    char resp[512];
@@ -35,7 +50,10 @@ void pedirLista() {
    Write(req, strlen(req), id);
 
    int n = Read(resp, 511, id);
-   if (n > 0) Write(resp, n, 1);
+   if (n > 0) {
+      int inicio = inicioBody(resp, n);
+      Write(resp + inicio, n - inicio, 1);
+   }
 
    Close(id);
 }
@@ -68,7 +86,10 @@ void pedirFigura() {
    Write(req, strlen(req), id);
 
    int n = Read(resp, 511, id);
-   if (n > 0) Write(resp, n, 1);
+   if (n > 0) {
+      int inicio = inicioBody(resp, n);
+      Write(resp + inicio, n - inicio, 1);
+   };
 
    Close(id);
 }

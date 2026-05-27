@@ -18,7 +18,7 @@ int main() {
     Salida[4] = 'o';
     Salida[5] = 's';
     Salida[6] = '.';
-    Salida[7] = '1';
+    Salida[7] = '2';
     Salida[8] = 0;
     i = Exec( "../test/copy" );
 //    Write( "Espera por el copy ...\n", 23, 1 );
