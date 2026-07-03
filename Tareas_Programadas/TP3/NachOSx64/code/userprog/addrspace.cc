@@ -20,6 +20,7 @@
 #include "copyright.h"
 #include "system.h"
 #include "addrspace.h"
+#include "synch.h"
 //#include "noff.h"
 
 #ifdef VM
@@ -32,6 +33,8 @@ static const int SwapSize = SwapPages * PageSize;
 static BitMap *swapMap = NULL;
 static int swapFileCounter = 0;
 
+static Lock *vmLock = NULL;
+
 static void InitVMStructures()
 {
     static bool initialized = false;
@@ -43,6 +46,8 @@ static void InitVMStructures()
         }
 
         swapMap = new BitMap(SwapPages);
+        vmLock = new Lock("VM global lock");
+
         initialized = true;
     }
 }
@@ -221,93 +226,32 @@ AddrSpace::AddrSpace(OpenFile *executable)
     }
 #endif
 }
-// AddrSpace::AddrSpace(OpenFile *executable)
-// {
-//     NoffHeader noffH;
-//     unsigned int i, size;
-
-//     openFilesTable = new NachosOpenFilesTable();
-//     openFilesTable->addThread();
-
-//     executable->ReadAt((char *)&noffH, sizeof(noffH), 0);
-//     if ((noffH.noffMagic != NOFFMAGIC) && 
-// 		(WordToHost(noffH.noffMagic) == NOFFMAGIC))
-//     	SwapHeader(&noffH);
-//     ASSERT(noffH.noffMagic == NOFFMAGIC);
-
-// // how big is address space?
-//     size = noffH.code.size + noffH.initData.size + noffH.uninitData.size 
-// 			+ UserStackSize;	// we need to increase the size
-// 						// to leave room for the stack
-//     numPages = divRoundUp(size, PageSize);
-//     size = numPages * PageSize;
-
-//     stackPages = divRoundUp(UserStackSize, PageSize);
-//     stackStartPage = numPages - stackPages;
-//     memoryUsers = new int;
-//     *memoryUsers = 1;
-
-//     ASSERT(numPages <= NumPhysPages);		// check we're not trying
-// 						// to run anything too big --
-// 						// at least until we have
-// 						// virtual memory
-
-//     DEBUG('a', "Initializing address space, num pages %d, size %d\n", 
-// 					numPages, size);
-//     // Prueba: reservar frames físicos antes de cargar el programa
-//     // machine->frameMap->Mark(0);
-//     // machine->frameMap->Mark(2);
-//     // machine->frameMap->Mark(4);
-//     // machine->frameMap->Mark(6);
-//     // machine->frameMap->Mark(8);
-//     // machine->frameMap->Mark(10);
-// // first, set up the translation 
-//     this->pageTable = new TranslationEntry[numPages];
-
-
-//     for (i = 0; i < numPages; i++) {
-//         int frame = machine->frameMap->Find();
-//         if (frame == -1) {
-//             printf("ERROR: No hay memoria fisica para cargar el programa\n");
-//             for (unsigned int j = 0; j < i; j++) {
-//                 machine->frameMap->Clear(pageTable[j].physicalPage);
-//             }
-//             delete [] pageTable;
-//             pageTable = NULL;
-//             numPages = 0;
-//             return;
-//         }
-//         pageTable[i].virtualPage = i;
-//         pageTable[i].physicalPage = frame;
-//         pageTable[i].valid = true;
-//         pageTable[i].use = false;
-//         pageTable[i].dirty = false;
-//         pageTable[i].readOnly = false;
-//     }
-// // zero out the entire address space, to zero the unitialized data segment 
-// // and the stack segment
-//     for (i = 0; i < numPages; i++) {
-//         bzero(&(machine->mainMemory[pageTable[i].physicalPage * PageSize]), PageSize);
-//     }
-// // then, copy in the code and data segments into memory
-//     if (noffH.code.size > 0) {
-//          LoadSegment(executable,
-//                 noffH.code.virtualAddr,
-//                 noffH.code.size,
-//                 noffH.code.inFileAddr);
-//     }
-//     if (noffH.initData.size > 0) {
-//         LoadSegment(executable,
-//                 noffH.initData.virtualAddr,
-//                 noffH.initData.size,
-//                 noffH.initData.inFileAddr);
-//     }
-
-// }
-AddrSpace::AddrSpace(AddrSpace *parent) {
+AddrSpace::AddrSpace(AddrSpace *parent)
+{
     numPages = parent->numPages;
     stackPages = parent->stackPages;
     stackStartPage = parent->stackStartPage;
+
+#ifdef VM
+    executableFile = parent->executableFile;
+    noffHeader = parent->noffHeader;
+
+    char swapName[32];
+    sprintf(swapName, "SWAP.%d", swapFileCounter++);
+
+    fileSystem->Create(swapName, SwapSize);
+    swapFile = fileSystem->Open(swapName);
+
+    swapPage = new int[numPages];
+    inSwap = new bool[numPages];
+    lastUse = new int[numPages];
+
+    for (unsigned int i = 0; i < numPages; i++) {
+        swapPage[i] = -1;
+        inSwap[i] = false;
+        lastUse[i] = 0;
+    }
+#endif
 
     memoryUsers = parent->memoryUsers;
     (*memoryUsers)++;
@@ -321,7 +265,10 @@ AddrSpace::AddrSpace(AddrSpace *parent) {
         pageTable[i] = parent->pageTable[i];
     }
 
-    // Nueva pila física para el hijo
+#ifdef VM
+    vmLock->Acquire();
+#endif
+
     for (int i = stackStartPage; i < (int)numPages; i++) {
         int frame = machine->frameMap->Find();
 
@@ -334,14 +281,27 @@ AddrSpace::AddrSpace(AddrSpace *parent) {
         pageTable[i].readOnly = false;
 
         bzero(&(machine->mainMemory[frame * PageSize]), PageSize);
+
+#ifdef VM
+        frameOwnerSpace[frame] = this;
+        frameOwnerVPN[frame] = i;
+        TouchPage(i);
+#endif
     }
+
+#ifdef VM
+    vmLock->Release();
+#endif
 }
 //----------------------------------------------------------------------
 // AddrSpace::~AddrSpace
 // 	Dealloate an address space.  Nothing for now!
 //----------------------------------------------------------------------
-AddrSpace::~AddrSpace()
-{
+AddrSpace::~AddrSpace() {
+#ifdef VM
+    vmLock->Acquire();
+#endif
+
     openFilesTable->delThread();
 
     (*memoryUsers)--;
@@ -356,12 +316,24 @@ AddrSpace::~AddrSpace()
             pageTable[i].valid &&
             pageTable[i].physicalPage >= 0) {
 
-            machine->frameMap->Clear(pageTable[i].physicalPage);
+            int frame = pageTable[i].physicalPage;
+
+            machine->frameMap->Clear(frame);
+
+#ifdef VM
+            if (frameOwnerSpace[frame] == this &&
+                frameOwnerVPN[frame] == (int)i) {
+                frameOwnerSpace[frame] = NULL;
+                frameOwnerVPN[frame] = -1;
+            }
+#endif
         }
 
 #ifdef VM
         if (inSwap[i] && swapPage[i] >= 0) {
             swapMap->Clear(swapPage[i]);
+            swapPage[i] = -1;
+            inSwap[i] = false;
         }
 #endif
     }
@@ -375,6 +347,8 @@ AddrSpace::~AddrSpace()
         delete swapFile;
         swapFile = NULL;
     }
+
+    vmLock->Release();
 #endif
 
     delete [] pageTable;
@@ -384,15 +358,6 @@ AddrSpace::~AddrSpace()
         delete memoryUsers;
     }
 }
-// AddrSpace::~AddrSpace()
-// {
-//     openFilesTable->delThread();
-//     delete openFilesTable;
-//     for (unsigned int i = 0; i < numPages; i++) {
-//         machine->frameMap->Clear(pageTable[i].physicalPage);
-//     }
-//     delete [] pageTable;
-// }
 
 //----------------------------------------------------------------------
 // AddrSpace::InitRegisters
@@ -411,16 +376,10 @@ void AddrSpace::InitRegisters()
     for (i = 0; i < NumTotalRegs; i++)
 	machine->WriteRegister(i, 0);
 
-    // Initial program counter -- must be location of "Start"
     machine->WriteRegister(PCReg, 0);	
 
-    // Need to also tell MIPS where next instruction is, because
-    // of branch delay possibility
     machine->WriteRegister(NextPCReg, 4);
 
-   // Set the stack register to the end of the address space, where we
-   // allocated the stack; but subtract off a bit, to make sure we don't
-   // accidentally reference off the end!
     machine->WriteRegister(StackReg, numPages * PageSize - 16);
     DEBUG('a', "Initializing stack register to %d\n", numPages * PageSize - 16);
 }
@@ -476,15 +435,44 @@ void AddrSpace::RestoreState() {
 #endif
 }
 
+static bool IsCodePage(NoffHeader *h, int vpn)
+{
+    int pageStart = vpn * PageSize;
+    int pageEnd = pageStart + PageSize;
+
+    int codeStart = h->code.virtualAddr;
+    int codeEnd = codeStart + h->code.size;
+
+    return pageStart < codeEnd && pageEnd > codeStart;
+}
+
+static bool IsInitDataPage(NoffHeader *h, int vpn)
+{
+    int pageStart = vpn * PageSize;
+    int pageEnd = pageStart + PageSize;
+
+    int dataStart = h->initData.virtualAddr;
+    int dataEnd = dataStart + h->initData.size;
+
+    return pageStart < dataEnd && pageEnd > dataStart;
+}
 bool AddrSpace::LoadPage(int vpn)
 {
     if (vpn < 0 || vpn >= (int)numPages) {
         return false;
     }
 
+#ifdef VM
+    vmLock->Acquire();
+#endif
+
     if (pageTable[vpn].valid) {
         UpdateTLB(vpn);
         TouchPage(vpn);
+
+#ifdef VM
+        vmLock->Release();
+#endif
         return true;
     }
 
@@ -512,7 +500,10 @@ bool AddrSpace::LoadPage(int vpn)
         }
 
         if (victimFrame == -1) {
-            victimFrame = 0;
+#ifdef VM
+            vmLock->Release();
+#endif
+            return false;
         }
 
         frame = victimFrame;
@@ -528,7 +519,9 @@ bool AddrSpace::LoadPage(int vpn)
             for (int i = 0; i < TLBSize; i++) {
                 if (machine->tlb[i].valid &&
                     machine->tlb[i].virtualPage == victimVPN) {
+
                     dirty = dirty || machine->tlb[i].dirty;
+
                     victimSpace->pageTable[victimVPN].use =
                         victimSpace->pageTable[victimVPN].use ||
                         machine->tlb[i].use;
@@ -538,12 +531,18 @@ bool AddrSpace::LoadPage(int vpn)
             }
 #endif
 
-            if (dirty) {
+            bool victimIsCode = IsCodePage(&victimSpace->noffHeader, victimVPN);
+            bool victimIsInitData = IsInitDataPage(&victimSpace->noffHeader, victimVPN);
+            bool victimIsStack = victimVPN >= victimSpace->stackStartPage;
+            bool victimIsPureCode = victimIsCode && !victimIsInitData && !victimIsStack;
+
+            if (dirty && !victimIsPureCode) {
                 if (!victimSpace->inSwap[victimVPN]) {
                     int swapSlot = swapMap->Find();
 
                     if (swapSlot == -1) {
                         printf("ERROR: SWAP lleno.\n");
+                        vmLock->Release();
                         return false;
                     }
 
@@ -561,7 +560,10 @@ bool AddrSpace::LoadPage(int vpn)
 
             victimSpace->pageTable[victimVPN].valid = false;
             victimSpace->pageTable[victimVPN].physicalPage = -1;
-            victimSpace->pageTable[victimVPN].dirty = dirty;
+            victimSpace->pageTable[victimVPN].dirty = false;
+
+            frameOwnerSpace[frame] = NULL;
+            frameOwnerVPN[frame] = -1;
         }
     }
 #else
@@ -634,6 +636,10 @@ bool AddrSpace::LoadPage(int vpn)
 
     UpdateTLB(vpn);
 
+#ifdef VM
+    vmLock->Release();
+#endif
+
     return true;
 }
 
@@ -643,10 +649,11 @@ void AddrSpace::UpdateTLB(int vpn)
     if (vpn < 0 || vpn >= (int)numPages)
         return;
 
-    // Si ya está en TLB, solo refrescar LRU y copiar bits
     for (int i = 0; i < TLBSize; i++) {
         if (machine->tlb[i].valid &&
-            machine->tlb[i].virtualPage == vpn) {
+            machine->tlb[i].virtualPage == vpn &&
+            pageTable[vpn].valid &&
+            machine->tlb[i].physicalPage == pageTable[vpn].physicalPage) {
 
             machine->tlb[i].use = true;
             TouchPage(vpn);
@@ -656,7 +663,6 @@ void AddrSpace::UpdateTLB(int vpn)
 
     int victim = -1;
 
-    // Primero buscar entrada libre
     for (int i = 0; i < TLBSize; i++) {
         if (!machine->tlb[i].valid) {
             victim = i;
@@ -664,14 +670,17 @@ void AddrSpace::UpdateTLB(int vpn)
         }
     }
 
-    // Si no hay libre, escoger la menos recientemente usada
     if (victim == -1) {
         int oldestUse = 2147483647;
 
         for (int i = 0; i < TLBSize; i++) {
             int oldVpn = machine->tlb[i].virtualPage;
 
-            if (oldVpn >= 0 && oldVpn < (int)numPages) {
+            if (oldVpn >= 0 &&
+                oldVpn < (int)numPages &&
+                pageTable[oldVpn].valid &&
+                machine->tlb[i].physicalPage == pageTable[oldVpn].physicalPage) {
+
                 int lu = lastUse[oldVpn];
 
                 if (lu < oldestUse) {
@@ -680,13 +689,20 @@ void AddrSpace::UpdateTLB(int vpn)
                 }
             }
         }
+
+        if (victim == -1) {
+            victim = 0;
+        }
     }
 
-    // Guardar bits use/dirty de la víctima antes de sacarla
     if (machine->tlb[victim].valid) {
         int oldVpn = machine->tlb[victim].virtualPage;
 
-        if (oldVpn >= 0 && oldVpn < (int)numPages) {
+        if (oldVpn >= 0 &&
+            oldVpn < (int)numPages &&
+            pageTable[oldVpn].valid &&
+            machine->tlb[victim].physicalPage == pageTable[oldVpn].physicalPage) {
+
             pageTable[oldVpn].use =
                 pageTable[oldVpn].use || machine->tlb[victim].use;
 
@@ -702,11 +718,11 @@ void AddrSpace::UpdateTLB(int vpn)
 #endif
 }
 
-void AddrSpace::TouchPage(int vpn)
-{
-#ifdef VM
-    if (vpn >= 0 && vpn < (int)numPages) {
-        lastUse[vpn] = ++lruClock;
-    }
-#endif
+void AddrSpace::TouchPage(int vpn) {
+    #ifdef VM
+        if (vpn >= 0 && vpn < (int)numPages) {
+            lastUse[vpn] = ++lruClock;
+        }
+    #endif
 }
+

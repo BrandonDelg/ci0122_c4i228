@@ -67,8 +67,9 @@ bool ReadStringFromUser(int userAddr, char *buffer, int maxSize) {
    int value;
 
    for (int i = 0; i < maxSize - 1; i++) {
-      if (!machine->ReadMem(userAddr + i, 1, &value)) {
-         return false;
+
+      while (!machine->ReadMem(userAddr + i, 1, &value)) {
+        
       }
 
       buffer[i] = (char)value;
@@ -257,16 +258,22 @@ void NachOS_Create() {
    char filename[MAX_FILENAME];
 
    if (!ReadStringFromUser(nameAddr, filename, MAX_FILENAME)) {
+      printf("[Create] ERROR leyendo filename\n");
       machine->WriteRegister(2, -1);
       return;
    }
 
-   int fd = creat(filename, 0644);
+   printf("[Create] filename = %s\n", filename);
+
+   int fd = open(filename, O_CREAT | O_TRUNC | O_RDWR, 0644);
 
    if (fd < 0) {
+      printf("[Create] ERROR no pudo crear %s\n", filename);
       machine->WriteRegister(2, -1);
       return;
    }
+
+   printf("[Create] creado OK %s fd=%d\n", filename, fd);
 
    close(fd);
    machine->WriteRegister(2, 0);

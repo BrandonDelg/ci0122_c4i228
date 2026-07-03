@@ -67,8 +67,10 @@ bool ReadStringFromUser(int userAddr, char *buffer, int maxSize) {
    int value;
 
    for (int i = 0; i < maxSize - 1; i++) {
-      if (!machine->ReadMem(userAddr + i, 1, &value)) {
-         return false;
+      int tries = 0;
+
+      while (!machine->ReadMem(userAddr + i, 1, &value)) {
+
       }
 
       buffer[i] = (char)value;
@@ -210,8 +212,8 @@ void NachOS_Exec()
       machine->WriteRegister(2, -1);
       return;
    }
-  bool LoadPage(int vpn);
-  void UpdateTLB(int vpn);
+//   bool LoadPage(int vpn);
+//   void UpdateTLB(int vpn);
    int pid = AllocProcess();
 
    if (pid < 0) {
@@ -257,13 +259,15 @@ void NachOS_Create() {
    char filename[MAX_FILENAME];
 
    if (!ReadStringFromUser(nameAddr, filename, MAX_FILENAME)) {
+      printf("[Create] ERROR leyendo filename\n");
       machine->WriteRegister(2, -1);
       return;
    }
 
-   int fd = creat(filename, 0644);
+   int fd = open(filename, O_CREAT | O_TRUNC | O_RDWR, 0644);
 
    if (fd < 0) {
+      printf("[Create] ERROR no pudo crear %s\n", filename);
       machine->WriteRegister(2, -1);
       return;
    }
@@ -271,7 +275,6 @@ void NachOS_Create() {
    close(fd);
    machine->WriteRegister(2, 0);
 }
-
 void NachOS_Open() {
    int nameAddr = machine->ReadRegister(4);
    char filename[MAX_FILENAME];
@@ -284,33 +287,21 @@ void NachOS_Open() {
    int unixFd = open(filename, O_RDWR);
 
    if (unixFd < 0) {
+      unixFd = open(filename, O_RDONLY);
+   }
+
+   if (unixFd < 0) {
       machine->WriteRegister(2, -1);
       return;
    }
 
    int nachosFd = currentThread->space->openFilesTable->Open(unixFd);
-
    machine->WriteRegister(2, nachosFd);
 }
 /*
  *  System call interface: OpenFileId Write( char *, int, OpenFileId )
  */
-// void NachOS_Write()
-// {
-//    int addr = machine->ReadRegister(4);
-//    int size = machine->ReadRegister(5);
-//    int file = machine->ReadRegister(6);
 
-//    int car;
-
-//    DEBUG('u', "Write system call\n");
-//    for (int i = 0; i < size; i++) {
-//       if (!machine->ReadMem(addr + i, 1, &car)) {
-//          return;
-//       }
-//       printf("%c", car);
-//    }
-// }
 void NachOS_Write()
 {
    int addr = machine->ReadRegister(4);
@@ -360,7 +351,7 @@ void NachOS_Read()
 
    int result = 0;
 
-   if (file == 0) {   // ConsoleInput
+   if (file == 0) {
 
       int i;
 
